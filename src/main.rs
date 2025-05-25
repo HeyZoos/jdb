@@ -8,6 +8,7 @@ use nix::{
 };
 use std::str::FromStr;
 use tracing::info;
+use which::which;
 
 /// ```sh
 /// cargo run -- --program /bin/echo
@@ -52,9 +53,11 @@ fn main() {
                 info!(pid = std::process::id(), "Asking to be traced");
                 ptrace::traceme().unwrap();
                 info!(pid = std::process::id(), program, "Calling exec");
-                let program_cstring = std::ffi::CString::from_str(program.as_str()).unwrap();
+                let absolute_program = which(&program).unwrap();
+                let absolute_program_str = absolute_program.to_str().unwrap();
+                info!(pid = std::process::id(), program=&program, absolute=absolute_program_str, "Resolved program to absolute path");
+                let program_cstring = std::ffi::CString::from_str(absolute_program_str).unwrap();
                 // Conventionally, argv[0] is the program name.
-                // TODO: We need to imitate the path aware behavior of `execlp`
                 nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()]).unwrap();
             }
             Err(_) => println!("Fork failed"),
