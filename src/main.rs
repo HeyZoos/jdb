@@ -78,7 +78,7 @@ fn main() {
     waitpid(target.unwrap(), None).unwrap();
 
     let mut rl = DefaultEditor::new().unwrap();
-    if rl.load_history("history.txt").is_err() {
+    if rl.load_history(".history").is_err() {
         error!(pid = id(), "No previous history.");
     }
 
