@@ -30,7 +30,7 @@ fn main() {
 
     // Attach to running program.
     if let Some(pid) = args.pid {
-        info!(target = pid, pid = id(), "Attaching to target process");
+        info!(target = pid, "[{}] Attaching to target process", id());
         target = Some(Pid::from_raw(pid));
         ptrace::attach(target.unwrap()).unwrap();
     }
@@ -39,23 +39,23 @@ fn main() {
     if let Some(program) = args.program {
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child, .. }) => {
-                info!(child = child.as_raw(), pid = id(), "Created child process");
+                info!(child = child.as_raw(), "[{}] Created child process", id());
                 target = Some(child);
             }
             Ok(ForkResult::Child) => {
                 // Indicates that this process is to be traced by its parent.
                 // This is the only ptrace request to be issued by the tracee.
                 // https://docs.rs/nix/latest/nix/sys/ptrace/fn.traceme.html
-                info!(pid = id(), "Asking to be traced");
+                info!("[{}] Asking to be traced", id());
                 ptrace::traceme().unwrap();
-                info!(pid = id(), program, "Calling exec");
+                info!(program, "[{}] Calling exec", id());
                 let absolute_program = which(&program).unwrap();
                 let absolute_program_str = absolute_program.to_str().unwrap();
                 info!(
-                    pid = id(),
                     program = &program,
                     absolute = absolute_program_str,
-                    "Resolved program to absolute path"
+                    "[{}] Resolved program to absolute path",
+                    id()
                 );
                 let program_cstring = std::ffi::CString::from_str(absolute_program_str).unwrap();
                 // Conventionally, argv[0] is the program name.
@@ -70,8 +70,8 @@ fn main() {
     {
         info!(
             child = target.unwrap().as_raw(),
-            pid = id(),
-            "Waiting for child process to pause"
+            "[{}] Waiting for child process",
+            id()
         );
     }
 
@@ -79,15 +79,18 @@ fn main() {
 
     let mut rl = DefaultEditor::new().unwrap();
     if rl.load_history(".history").is_err() {
-        error!(pid = id(), "No previous history.");
+        error!("[{}] No previous history", id());
     }
 
     loop {
-        let readline = rl.readline(">> ");
+        let readline = rl.readline("jdb> ");
         match readline {
             Ok(line) => {
+                if (line == "continue" || line == "c") {
+                    
+                }
                 rl.add_history_entry(line.as_str()).unwrap();
-                info!(pid = id(), line, "Add history entry");
+                info!(line, "[{}] Add history entry", id());
             }
             Err(ReadlineError::Interrupted) => {
                 info!(pid = id(), "CTRL-C");
