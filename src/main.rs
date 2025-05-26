@@ -1,5 +1,7 @@
+use bon::Builder;
 use clap::ArgGroup;
 use clap::Parser;
+use nix::errno::Errno;
 use nix::sys::ptrace;
 use nix::unistd::Pid;
 use nix::{
@@ -8,6 +10,7 @@ use nix::{
 };
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use std::path::PathBuf;
 use std::process::id;
 use std::str::FromStr;
 use tracing::{error, info};
@@ -26,56 +29,25 @@ fn main() {
     // Get the program invocation arguments.
     let args = Args::parse();
 
-    let mut target: Option<Pid> = None;
-
-    // Attach to running program.
-    if let Some(pid) = args.pid {
-        info!(target = pid, "[{}] Attaching to target process", id());
-        target = Some(Pid::from_raw(pid));
-        ptrace::attach(target.unwrap()).unwrap();
-    }
-
-    // Or attempt to create and attach to a child program.
-    if let Some(program) = args.program {
-        match unsafe { fork() } {
-            Ok(ForkResult::Parent { child, .. }) => {
-                info!(child = child.as_raw(), "[{}] Created child process", id());
-                target = Some(child);
-            }
-            Ok(ForkResult::Child) => {
-                // Indicates that this process is to be traced by its parent.
-                // This is the only ptrace request to be issued by the tracee.
-                // https://docs.rs/nix/latest/nix/sys/ptrace/fn.traceme.html
-                info!("[{}] Asking to be traced", id());
-                ptrace::traceme().unwrap();
-                info!(program, "[{}] Calling exec", id());
-                let absolute_program = which(&program).unwrap();
-                let absolute_program_str = absolute_program.to_str().unwrap();
-                info!(
-                    program = &program,
-                    absolute = absolute_program_str,
-                    "[{}] Resolved program to absolute path",
-                    id()
-                );
-                let program_cstring = std::ffi::CString::from_str(absolute_program_str).unwrap();
-                // Conventionally, argv[0] is the program name.
-                // This does not terminate and is the reason for the `#[allow(unreachable_code)]`.
-                nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()]).unwrap();
-            }
-            Err(_) => println!("Fork failed"),
-        }
-    }
+    let process = if let Some(pid) = args.pid {
+        Process::attach(Pid::from_raw(pid)).unwrap()
+    }  else if let Some(program) = args.program {
+        Process::launch(program).unwrap()
+    } else {
+        error!("This should not be reachable, somehow neither --pid nor --program were provided");
+        std::process::exit(1);
+    };
 
     #[allow(unreachable_code)]
     {
         info!(
-            child = target.unwrap().as_raw(),
+            child = process.pid.as_raw(),
             "[{}] Waiting for child process",
             id()
         );
     }
 
-    waitpid(target.unwrap(), None).unwrap();
+    waitpid(process.pid, None).unwrap();
 
     let mut rl = DefaultEditor::new().unwrap();
     if rl.load_history(".history").is_err() {
@@ -87,8 +59,8 @@ fn main() {
         match readline {
             Ok(line) => {
                 if line == "continue" || line == "c" {
-                   ptrace::cont(target.unwrap(), None).unwrap();
-                    waitpid(target.unwrap(), None).unwrap();
+                    ptrace::cont(process.pid, None).unwrap();
+                    waitpid(process.pid, None).unwrap();
                 }
                 rl.add_history_entry(line.as_str()).unwrap();
                 info!(line, "[{}] Add history entry", id());
@@ -119,9 +91,80 @@ fn main() {
 struct Args {
     // We can possibly kick off this child as a subprocess i.e. `jdb --program <program>`
     #[arg(long)]
-    program: Option<String>,
+    program: Option<PathBuf>,
 
     // Or we can attach to a running PID `jdb --pid <pid>`
     #[arg(long)]
     pid: Option<i32>,
+}
+
+#[derive(Builder)]
+struct Process {
+    pid: Pid,
+    terminate_on_end: bool,
+    state: ProcessState,
+}
+
+impl Process {
+    fn attach(pid: Pid) -> Result<Process, Errno> {
+        info!(
+            target = pid.as_raw(),
+            "[{}] Attaching to target process",
+            id()
+        );
+        ptrace::attach(pid)?;
+        Ok(Process::builder()
+            .pid(pid)
+            .terminate_on_end(false)
+            .state(ProcessState::Stopped)
+            .build())
+    }
+
+    fn launch(path: PathBuf) -> Result<Process, Errno> {
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child, .. }) => {
+                info!(child = child.as_raw(), "[{}] Created child process", id());
+                Ok(Process::builder()
+                    .pid(child)
+                    .state(ProcessState::Stopped)
+                    .terminate_on_end(true)
+                    .build())
+            }
+            Ok(ForkResult::Child) => {
+                // Indicates that this process is to be traced by its parent.
+                // This is the only ptrace request to be issued by the tracee.
+                // https://docs.rs/nix/latest/nix/sys/ptrace/fn.traceme.html
+                info!("[{}] Asking to be traced", id());
+                ptrace::traceme()?;
+                info!(program = path.to_str().unwrap(), "[{}] Calling exec", id());
+                let program = which(&path).unwrap();
+                let program = program.to_str().unwrap();
+                info!(
+                    program = &program,
+                    "[{}] Resolved program to absolute path",
+                    id()
+                );
+                let program_cstring = std::ffi::CString::from_str(program).unwrap();
+                // Conventionally, argv[0] is the program name.
+                // This does not terminate and is the reason for the `#[allow(unreachable_code)]`.
+                nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()])?;
+                Ok(Process::builder()
+                    .pid(Pid::from_raw(id() as i32))
+                    .state(ProcessState::Stopped)
+                    .terminate_on_end(true)
+                    .build())
+            }
+            Err(errno) => {
+                error!(errno = errno as i32, "Fork failed");
+                Err(errno)
+            }
+        }
+    }
+}
+
+enum ProcessState {
+    Stopped,
+    Running,
+    Exited,
+    Terminated,
 }
