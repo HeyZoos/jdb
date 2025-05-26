@@ -3,6 +3,7 @@ use clap::ArgGroup;
 use clap::Parser;
 use nix::errno::Errno;
 use nix::sys::ptrace;
+use nix::sys::signal::SIGSTOP;
 use nix::unistd::Pid;
 use nix::{
     sys::wait::waitpid,
@@ -150,6 +151,18 @@ impl Process {
                 error!(errno = errno as i32, "Fork failed");
                 Err(errno)
             }
+        }
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        match self.state {
+            ProcessState::Running => {
+                nix::sys::signal::kill(self.pid, SIGSTOP).unwrap();
+                nix::sys::wait::waitpid(self.pid) 
+            }
+            _ => todo!(),
         }
     }
 }
