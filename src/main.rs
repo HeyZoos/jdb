@@ -86,8 +86,9 @@ fn main() {
         let readline = rl.readline("jdb> ");
         match readline {
             Ok(line) => {
-                if (line == "continue" || line == "c") {
-                    
+                if line == "continue" || line == "c" {
+                   ptrace::cont(target.unwrap(), None).unwrap();
+                    waitpid(target.unwrap(), None).unwrap();
                 }
                 rl.add_history_entry(line.as_str()).unwrap();
                 info!(line, "[{}] Add history entry", id());
