@@ -19,7 +19,6 @@ use which::which;
 /// ```sh
 /// cargo run -- --program /bin/echo
 /// ```
-/// We allow this warning because the child process which calls `exec` does not terminate.
 fn main() {
     // Install a global tracing subscriber that listens for events and filters based on the value of
     // the RUST_LOG environment variable. This is a quick and easy way to get the loggers to just
@@ -31,21 +30,18 @@ fn main() {
 
     let process = if let Some(pid) = args.pid {
         Process::attach(Pid::from_raw(pid)).unwrap()
-    }  else if let Some(program) = args.program {
+    } else if let Some(program) = args.program {
         Process::launch(program).unwrap()
     } else {
         error!("This should not be reachable, somehow neither --pid nor --program were provided");
         std::process::exit(1);
     };
 
-    #[allow(unreachable_code)]
-    {
-        info!(
-            child = process.pid.as_raw(),
-            "[{}] Waiting for child process",
-            id()
-        );
-    }
+    info!(
+        child = process.pid.as_raw(),
+        "[{}] Waiting for child process",
+        id()
+    );
 
     waitpid(process.pid, None).unwrap();
 
@@ -146,7 +142,6 @@ impl Process {
                 );
                 let program_cstring = std::ffi::CString::from_str(program).unwrap();
                 // Conventionally, argv[0] is the program name.
-                // This does not terminate and is the reason for the `#[allow(unreachable_code)]`.
                 nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()])?;
                 Ok(Process::builder()
                     .pid(Pid::from_raw(id() as i32))
