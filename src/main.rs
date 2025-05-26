@@ -19,7 +19,7 @@ use which::which;
 /// ```sh
 /// cargo run -- --program /bin/echo
 /// ```
-fn main() {
+fn main() -> anyhow::Result<()> {
     // Install a global tracing subscriber that listens for events and filters based on the value of
     // the RUST_LOG environment variable. This is a quick and easy way to get the loggers to just
     // **do stuff**.
@@ -29,9 +29,9 @@ fn main() {
     let args = Args::parse();
 
     let process = if let Some(pid) = args.pid {
-        Process::attach(Pid::from_raw(pid)).unwrap()
+        Process::attach(Pid::from_raw(pid))?
     } else if let Some(program) = args.program {
-        Process::launch(program).unwrap()
+        Process::launch(program)?
     } else {
         error!("This should not be reachable, somehow neither --pid nor --program were provided");
         std::process::exit(1);
@@ -43,9 +43,9 @@ fn main() {
         id()
     );
 
-    waitpid(process.pid, None).unwrap();
+    waitpid(process.pid, None)?;
 
-    let mut rl = DefaultEditor::new().unwrap();
+    let mut rl = DefaultEditor::new()?;
     if rl.load_history(".history").is_err() {
         error!("[{}] No previous history", id());
     }
@@ -55,23 +55,20 @@ fn main() {
         match readline {
             Ok(line) => {
                 if line == "continue" || line == "c" {
-                    ptrace::cont(process.pid, None).unwrap();
-                    waitpid(process.pid, None).unwrap();
+                    ptrace::cont(process.pid, None)?;
+                    waitpid(process.pid, None)?;
                 }
-                rl.add_history_entry(line.as_str()).unwrap();
+                rl.add_history_entry(line.as_str())?;
                 info!(line, "[{}] Add history entry", id());
             }
             Err(ReadlineError::Interrupted) => {
                 info!(pid = id(), "CTRL-C");
-                break;
             }
             Err(ReadlineError::Eof) => {
                 info!(pid = id(), "CTRL-D");
-                break;
             }
             Err(err) => {
                 info!(pid = id(), "Error: {:?}", err);
-                break;
             }
         }
     }
