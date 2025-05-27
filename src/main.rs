@@ -1,9 +1,12 @@
+use std::cmp::PartialEq;
 use bon::Builder;
 use clap::ArgGroup;
 use clap::Parser;
 use nix::errno::Errno;
+use nix::libc::wait;
 use nix::sys::ptrace;
-use nix::sys::signal::SIGSTOP;
+use nix::sys::ptrace::{cont, detach};
+use nix::sys::signal::{SIGCONT, SIGKILL, SIGSTOP, kill};
 use nix::unistd::Pid;
 use nix::{
     sys::wait::waitpid,
@@ -29,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     // Get the program invocation arguments.
     let args = Args::parse();
 
-    let process = if let Some(pid) = args.pid {
+    let mut process = if let Some(pid) = args.pid {
         Process::attach(Pid::from_raw(pid))?
     } else if let Some(program) = args.program {
         Process::launch(program)?
@@ -56,8 +59,7 @@ fn main() -> anyhow::Result<()> {
         match readline {
             Ok(line) => {
                 if line == "continue" || line == "c" {
-                    ptrace::cont(process.pid, None)?;
-                    waitpid(process.pid, None)?;
+                    process.resume()?;
                 }
                 rl.add_history_entry(line.as_str())?;
                 info!(line, "[{}] Add history entry", id());
@@ -153,20 +155,33 @@ impl Process {
             }
         }
     }
+
+    fn resume(&mut self) -> anyhow::Result<()> {
+        cont(self.pid, None)?;
+        waitpid(self.pid, None)?;
+        self.state = ProcessState::Running;
+        Ok(())
+    }
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
-        match self.state {
-            ProcessState::Running => {
-                nix::sys::signal::kill(self.pid, SIGSTOP).unwrap();
-                nix::sys::wait::waitpid(self.pid) 
-            }
-            _ => todo!(),
+        if self.state == ProcessState::Running {
+            kill(self.pid, SIGSTOP).unwrap();
+            waitpid(self.pid, None).unwrap();
+        }
+
+        detach(self.pid, None).unwrap();
+        kill(self.pid, SIGCONT).unwrap();
+
+        if self.terminate_on_end {
+            kill(self.pid, SIGKILL).unwrap();
+            waitpid(self.pid, None).unwrap();
         }
     }
 }
 
+#[derive(PartialEq)]
 enum ProcessState {
     Stopped,
     Running,
