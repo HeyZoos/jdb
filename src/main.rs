@@ -1,12 +1,11 @@
-use std::cmp::PartialEq;
 use bon::Builder;
 use clap::ArgGroup;
 use clap::Parser;
 use nix::errno::Errno;
-use nix::libc::wait;
 use nix::sys::ptrace;
 use nix::sys::ptrace::{cont, detach};
 use nix::sys::signal::{SIGCONT, SIGKILL, SIGSTOP, kill};
+use nix::sys::wait::WaitStatus;
 use nix::unistd::Pid;
 use nix::{
     sys::wait::waitpid,
@@ -14,6 +13,8 @@ use nix::{
 };
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use std::cmp::PartialEq;
+use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use std::process::id;
 use std::str::FromStr;
@@ -47,7 +48,7 @@ fn main() -> anyhow::Result<()> {
         id()
     );
 
-    waitpid(process.pid, None)?;
+    process.wait()?;
 
     let mut rl = DefaultEditor::new()?;
     if rl.load_history(".history").is_err() {
@@ -65,7 +66,8 @@ fn main() -> anyhow::Result<()> {
                 info!(line, "[{}] Add history entry", id());
             }
             Err(ReadlineError::Interrupted) => {
-                info!(pid = id(), "CTRL-C");
+                info!("[{}] Calling interrupt", id());
+                break;
             }
             Err(ReadlineError::Eof) => {
                 info!(pid = id(), "CTRL-D");
@@ -75,6 +77,13 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    info!(
+        state = process.state.to_string(),
+        "[{}] Process exited",
+        id()
+    );
+    Ok(())
 }
 
 #[derive(Debug, Parser)]
@@ -158,33 +167,88 @@ impl Process {
 
     fn resume(&mut self) -> anyhow::Result<()> {
         cont(self.pid, None)?;
-        waitpid(self.pid, None)?;
+        self.wait()?;
         self.state = ProcessState::Running;
+        Ok(())
+    }
+
+    fn wait(&mut self) -> anyhow::Result<()> {
+        let status = waitpid(self.pid, None)?;
+        info!(
+            signal = format!("{:?}", status),
+            "[{}] Received signal after waiting",
+            id()
+        );
+        match status {
+            WaitStatus::Exited(_, _) => {
+                self.state = ProcessState::Exited;
+            }
+            WaitStatus::Signaled(_, _, _) => {
+                self.state = ProcessState::Terminated;
+            }
+            WaitStatus::Stopped(_, _) => {
+                self.state = ProcessState::Stopped;
+            }
+            _ => {}
+        }
+
         Ok(())
     }
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
+        info!(
+            child = self.pid.as_raw(),
+            "[{}] Entering drop logic for child process",
+            id()
+        );
         if self.state == ProcessState::Running {
+            info!(
+                child = self.pid.as_raw(),
+                "[{}] Calling SIGSTOP on child process",
+                id()
+            );
             kill(self.pid, SIGSTOP).unwrap();
-            waitpid(self.pid, None).unwrap();
+            self.wait().unwrap();
         }
 
+        info!(
+            child = self.pid.as_raw(),
+            "[{}] Detaching from the child process",
+            id()
+        );
         detach(self.pid, None).unwrap();
+
+        info!(
+            child = self.pid.as_raw(),
+            "[{}] Calling SIGCONT on child process",
+            id()
+        );
         kill(self.pid, SIGCONT).unwrap();
 
         if self.terminate_on_end {
+            info!(
+                child = self.pid.as_raw(),
+                "[{}] Calling SIGKILL on child process",
+                id()
+            );
             kill(self.pid, SIGKILL).unwrap();
-            waitpid(self.pid, None).unwrap();
+            self.wait().unwrap();
         }
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum ProcessState {
     Stopped,
     Running,
     Exited,
     Terminated,
+}
+
+impl Display for ProcessState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
