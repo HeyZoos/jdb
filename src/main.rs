@@ -220,7 +220,19 @@ impl Drop for Process {
             "[{}] Detaching from the child process",
             id()
         );
-        detach(self.pid, None).unwrap();
+        match detach(self.pid, None) {
+            Ok(_) => info!(
+                child = self.pid.as_raw(),
+                "[{}] Successfully detached from child process",
+                id()
+            ),
+            Err(errno) => error!(
+                child = self.pid.as_raw(),
+                errno = errno as i32,
+                "[{}] Failed to detach from child process",
+                id(),
+            ),
+        }
 
         info!(
             child = self.pid.as_raw(),
