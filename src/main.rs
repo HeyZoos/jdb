@@ -173,6 +173,8 @@ impl Process {
     }
 
     fn wait(&mut self) -> anyhow::Result<()> {
+        // This call blocks until the child changes state (such as being
+        // stopped by a signal)
         let status = waitpid(self.pid, None)?;
         info!(
             signal = format!("{:?}", status),
@@ -250,5 +252,25 @@ enum ProcessState {
 impl Display for ProcessState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_launch() {
+        let process = Process::launch(PathBuf::from("/bin/echo")).unwrap();
+        assert!(process_exists(process.pid));
+    }
+
+    /// If you call kill with a signal of 0, it doesn’t send a signal to the
+    /// process but still carries out the existence and permission checks it
+    /// would make when actually sending a signal
+    fn process_exists(pid: Pid) -> bool {
+        // Send a signal to a process, if signal is None, error checking is
+        // performed but no signal is actually sent
+        kill(pid, None).is_ok()
     }
 }
