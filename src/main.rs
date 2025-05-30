@@ -6,7 +6,7 @@ use nix::sys::ptrace;
 use nix::sys::ptrace::{cont, detach};
 use nix::sys::signal::{SIGCONT, SIGKILL, SIGSTOP, kill};
 use nix::sys::wait::WaitStatus;
-use nix::unistd::Pid;
+use nix::unistd::{Pid, close};
 use nix::{
     sys::wait::waitpid,
     unistd::{ForkResult, fork},
@@ -15,9 +15,11 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::cmp::PartialEq;
 use std::fmt::{Display, Formatter};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::id;
 use std::str::FromStr;
+use nix::libc::tolower;
 use tracing::{error, info};
 use which::which;
 
@@ -101,6 +103,45 @@ struct Args {
     // Or we can attach to a running PID `jdb --pid <pid>`
     #[arg(long)]
     pid: Option<i32>,
+}
+
+struct Pipe {
+    read: OwnedFd,
+    write: OwnedFd,
+}
+
+impl Pipe {
+    fn new(close_on_exec: bool) -> Result<Pipe, Errno> {
+        let (read, write) = nix::unistd::pipe2(if close_on_exec {
+            nix::fcntl::OFlag::empty()
+        } else {
+            // We pass O_CLOEXEC to pipe2 if `close_on_exec` is true, to
+            // ensure that the pipe gets closed when we call `execlp`.
+            // Otherwise, the process will hang while trying to read from
+            // the pipe due to the duplicated file descriptors.
+            nix::fcntl::OFlag::O_NONBLOCK
+        })?;
+
+        Ok(Pipe {
+            read: OwnedFd::from(read),
+            write: OwnedFd::from(write),
+        })
+    }
+
+    fn read(&self) -> &OwnedFd {
+        todo!()
+    }
+
+    fn write(&self) -> &OwnedFd {
+        todo!()
+    }
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        close(self.read.as_raw_fd()).unwrap();
+        close(self.write.as_raw_fd()).unwrap();
+    }
 }
 
 #[derive(Builder)]
