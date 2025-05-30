@@ -15,11 +15,10 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::cmp::PartialEq;
 use std::fmt::{Display, Formatter};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::id;
 use std::str::FromStr;
-use nix::libc::tolower;
 use tracing::{error, info};
 use which::which;
 
@@ -128,12 +127,20 @@ impl Pipe {
         })
     }
 
-    fn read(&self) -> &OwnedFd {
-        todo!()
+    fn read(&self) -> Result<Vec<u8>, Errno> {
+        let mut buffer = [0u8; 1024];
+        let fd = self.read.as_fd();
+        match nix::unistd::read(fd, &mut buffer) {
+            Ok(_) => Ok(buffer.to_vec()),
+            Err(errno) => Err(errno)
+        }
     }
 
-    fn write(&self) -> &OwnedFd {
-        todo!()
+    fn write(&self, bytes: &[u8]) -> Result<(), Errno> {
+        match nix::unistd::write(self.write.as_fd(), bytes) {
+            Ok(_) => Ok(()),
+            Err(errno) => Err(errno)
+        }
     }
 }
 
@@ -167,6 +174,10 @@ impl Process {
     }
 
     fn launch(path: PathBuf) -> Result<Process, Errno> {
+        // It’s important to call pipe before fork, or the pipes won’t function;
+        // the pipes in the two processes would be completely distinct
+        let pipe = Pipe::new(true)?;
+        
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child, .. }) => {
                 info!(child = child.as_raw(), "[{}] Created child process", id());
