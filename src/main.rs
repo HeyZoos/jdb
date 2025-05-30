@@ -277,6 +277,12 @@ mod tests {
         assert!(process_exists(process.pid));
     }
 
+    #[test]
+    fn test_process_launch_non_existent_program() {
+        let result = Process::launch(PathBuf::from("/nonexistent/program"));
+        assert!(result.is_err());
+    }
+
     /// If you call kill with a signal of 0, it doesn’t send a signal to the
     /// process but still carries out the existence and permission checks it
     /// would make when actually sending a signal
