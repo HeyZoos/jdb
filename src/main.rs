@@ -15,12 +15,11 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::cmp::PartialEq;
 use std::fmt::{Display, Formatter};
-use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::id;
 use std::str::FromStr;
-use tracing::{error, info};
+use tracing::{error, info, info_span, span};
 use which::which;
 
 /// ```sh
@@ -32,29 +31,27 @@ fn main() -> anyhow::Result<()> {
     // **do stuff**.
     tracing_subscriber::fmt::init();
 
+    let _span = span!(tracing::Level::INFO, "main", pid = id()).entered();
+
     // Get the program invocation arguments.
     let args = Args::parse();
 
     let mut process = if let Some(pid) = args.pid {
         Process::attach(Pid::from_raw(pid))?
     } else if let Some(program) = args.program {
-        Process::launch(program)?
+        Process::launch(program, true)?
     } else {
         error!("This should not be reachable, somehow neither --pid nor --program were provided");
         std::process::exit(1);
     };
 
-    info!(
-        child = process.pid.as_raw(),
-        "[{}] Waiting for child process",
-        id()
-    );
+    info!(child = process.pid.as_raw(), "Waiting for child process",);
 
     process.wait()?;
 
     let mut rl = DefaultEditor::new()?;
     if rl.load_history(".history").is_err() {
-        error!("[{}] No previous history", id());
+        error!("No previous history");
     }
 
     loop {
@@ -65,10 +62,10 @@ fn main() -> anyhow::Result<()> {
                     process.resume()?;
                 }
                 rl.add_history_entry(line.as_str())?;
-                info!(line, "[{}] Add history entry", id());
+                info!(line, "Add history entry");
             }
             Err(ReadlineError::Interrupted) => {
-                info!("[{}] Calling interrupt", id());
+                info!("Calling interrupt");
                 break;
             }
             Err(ReadlineError::Eof) => {
@@ -142,15 +139,11 @@ impl Pipe {
         let fd = self.read.as_ref().unwrap().as_fd();
         match nix::unistd::read(fd, &mut buffer) {
             Ok(n) => {
-                info!(n_bytes = n, "[{}] Read from pipe", id());
+                info!(n_bytes = n, "Read from pipe");
                 Ok(buffer[..n].to_vec())
             }
             Err(errno) => {
-                error!(
-                    errno = errno.to_string(),
-                    "[{}] Failed to read from pipe",
-                    id()
-                );
+                error!(errno = errno.to_string(), "Failed to read from pipe",);
                 Err(errno)
             }
         }
@@ -188,80 +181,83 @@ impl Pipe {
 struct Process {
     pid: Pid,
     terminate_on_end: bool,
+    is_attached: bool,
     state: ProcessState,
 }
 
 impl Process {
-    fn attach(pid: Pid) -> Result<Process, Errno> {
-        info!(
-            target = pid.as_raw(),
-            "[{}] Attaching to target process",
-            id()
-        );
+    fn attach(pid: Pid) -> anyhow::Result<Process> {
+        let _span = span!(tracing::Level::INFO, "attach", pid = id()).entered();
+
+        info!(target = pid.as_raw(), "Attaching to target process",);
         ptrace::attach(pid)?;
-        Ok(Process::builder()
+        let mut process = Process::builder()
             .pid(pid)
             .terminate_on_end(false)
             .state(ProcessState::Stopped)
-            .build())
+            .is_attached(true)
+            .build();
+
+        process.wait()?;
+
+        Ok(process)
     }
 
-    fn launch(path: PathBuf) -> anyhow::Result<Process> {
-        info!(
-            path = format!("{:?}", path),
-            "[{}] Attempting to launch program",
-            id()
-        );
+    fn launch(path: PathBuf, attach: bool) -> anyhow::Result<Process> {
+        let _span = info_span!("launch", pid = id()).entered();
+
+        info!(path = format!("{:?}", path), "Attempting to launch program",);
         // It’s important to call pipe before fork, or the pipes won’t function;
         // the pipes in the two processes would be completely distinct
         let mut pipe = Pipe::new(true)?;
 
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child, .. }) => {
+                let _span = info_span!("parent", child=%child).entered();
+
                 pipe.close_write();
                 let data = pipe.read()?;
+                info!("Waiting for child process to change status");
                 waitpid(child, None)?;
 
                 if data.len() > 0 {
                     let chars = String::from_utf8(data)?;
-                    error!(
-                        error = chars,
-                        "[{}] Received an error from the child process",
-                        id()
-                    );
+                    error!(error = chars, "Received an error from the child process");
                     return Err(Errno::UnknownErrno.into());
                 }
 
-                info!(child = child.as_raw(), "[{}] Created child process", id());
+                info!(child = child.as_raw(), "Created child process");
                 Ok(Process::builder()
                     .pid(child)
                     .state(ProcessState::Stopped)
                     .terminate_on_end(true)
+                    .is_attached(attach)
                     .build())
             }
             Ok(ForkResult::Child) => {
+                let _span = info_span!("child", pid = id()).entered();
+
                 pipe.close_read();
                 // Indicates that this process is to be traced by its parent.
                 // This is the only ptrace request to be issued by the tracee.
                 // https://docs.rs/nix/latest/nix/sys/ptrace/fn.traceme.html
-                info!("[{}] Asking to be traced", id());
-                if ptrace::traceme().is_err() {
+                info!("Asking to be traced");
+                if attach && ptrace::traceme().is_err() {
                     exit_with_pipe_error(pipe, "Tracing failed");
                 }
-                info!(program = path.to_str().unwrap(), "[{}] Calling exec", id());
+                info!(program = path.to_str().unwrap(), "Calling exec");
 
                 let program = match which(&path) {
                     Ok(program) => program,
                     Err(_) => {
-                        error!("[{}] Failed to resolve program to absolute path", id());
+                        error!("Failed to resolve program to absolute path");
                         exit_with_pipe_error(pipe, "Failed to resolve program to absolute path");
                     }
                 };
 
                 info!(
                     program = &program.to_str().unwrap(),
-                    "[{}] Resolved program to absolute path",
-                    id()
+                    "Resolved program to absolute path",
                 );
                 let program_cstring = std::ffi::CString::from_str(program.to_str().unwrap())?;
                 // Conventionally, argv[0] is the program name.
@@ -271,11 +267,18 @@ impl Process {
                     exit_with_pipe_error(pipe, "Exec failed");
                 }
 
-                Ok(Process::builder()
+                let mut process = Process::builder()
                     .pid(Pid::from_raw(id() as i32))
                     .state(ProcessState::Stopped)
                     .terminate_on_end(true)
-                    .build())
+                    .is_attached(attach)
+                    .build();
+
+                if attach {
+                    process.wait()?;
+                }
+
+                Ok(process)
             }
             Err(errno) => {
                 error!(errno = errno as i32, "Fork failed");
@@ -297,8 +300,7 @@ impl Process {
         let status = waitpid(self.pid, None)?;
         info!(
             signal = format!("{:?}", status),
-            "[{}] Received signal after waiting",
-            id()
+            "Received signal after waiting",
         );
         match status {
             WaitStatus::Exited(_, _) => {
@@ -321,50 +323,45 @@ impl Drop for Process {
     fn drop(&mut self) {
         info!(
             child = self.pid.as_raw(),
-            "[{}] Entering drop logic for child process",
-            id()
+            "Entering drop logic for child process",
         );
-        if self.state == ProcessState::Running {
+
+        if self.is_attached {
+            if self.state == ProcessState::Running {
+                info!(
+                    child = self.pid.as_raw(),
+                    "Calling SIGSTOP on child process"
+                );
+                kill(self.pid, SIGSTOP).unwrap();
+                self.wait().unwrap();
+            }
             info!(
                 child = self.pid.as_raw(),
-                "[{}] Calling SIGSTOP on child process",
-                id()
+                "Detaching from the child process",
             );
-            kill(self.pid, SIGSTOP).unwrap();
-            self.wait().unwrap();
-        }
+            match detach(self.pid, None) {
+                Ok(_) => info!(
+                    child = self.pid.as_raw(),
+                    "Successfully detached from child process",
+                ),
+                Err(errno) => error!(
+                    child = self.pid.as_raw(),
+                    errno = errno as i32,
+                    "Failed to detach from child process",
+                ),
+            }
 
-        info!(
-            child = self.pid.as_raw(),
-            "[{}] Detaching from the child process",
-            id()
-        );
-        match detach(self.pid, None) {
-            Ok(_) => info!(
+            info!(
                 child = self.pid.as_raw(),
-                "[{}] Successfully detached from child process",
-                id()
-            ),
-            Err(errno) => error!(
-                child = self.pid.as_raw(),
-                errno = errno as i32,
-                "[{}] Failed to detach from child process",
-                id(),
-            ),
+                "Calling SIGCONT on child process",
+            );
+            kill(self.pid, SIGCONT).unwrap();
         }
-
-        info!(
-            child = self.pid.as_raw(),
-            "[{}] Calling SIGCONT on child process",
-            id()
-        );
-        kill(self.pid, SIGCONT).unwrap();
 
         if self.terminate_on_end {
             info!(
                 child = self.pid.as_raw(),
-                "[{}] Calling SIGKILL on child process",
-                id()
+                "Calling SIGKILL on child process",
             );
             kill(self.pid, SIGKILL).unwrap();
             self.wait().unwrap();
@@ -386,31 +383,33 @@ impl Display for ProcessState {
     }
 }
 
-fn get_process_status(pid: Pid) -> anyhow::Result<()> {
-    let process = std::fs::File::open(format!("/proc/{pid}/stat"));
-    if let Ok(mut file) = process {
-        let mut buffer = vec![];
-        file.read_to_end(&mut buffer)?;
-    }
-    todo!()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
 
     #[test]
     fn test_process_launch_successfully() {
         info!("test_process_launch");
-        let process = Process::launch(PathBuf::from("/bin/echo")).unwrap();
+        let process = Process::launch(PathBuf::from("/bin/echo"), true).unwrap();
         assert!(process_exists(process.pid));
     }
 
     #[test]
     fn test_process_launch_non_existent_program() {
         info!("test_process_launch_non_existent_program");
-        let result = Process::launch(PathBuf::from("/nonexistent/program"));
+        let result = Process::launch(PathBuf::from("/nonexistent/program"), true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_process_attach_successfully() {
+        tracing_subscriber::fmt::init();
+        let target = Process::launch("tail".parse().unwrap(), false);
+        let pid = target.unwrap().pid;
+        let process = Process::attach(pid);
+        // The status 't' indicates that the process is stopped
+        assert_eq!(get_process_status(process.unwrap().pid).unwrap(), 't');
     }
 
     /// If you call kill with a signal of 0, it doesn’t send a signal to the
@@ -420,5 +419,25 @@ mod tests {
         // Send a signal to a process, if signal is None, error checking is
         // performed but no signal is actually sent
         kill(pid, None).is_ok()
+    }
+
+    fn get_process_status(pid: Pid) -> anyhow::Result<char> {
+        let process = std::fs::File::open(format!("/proc/{pid}/stat"));
+        if let Ok(file) = process {
+            let mut buffer = String::new();
+            let mut reader = std::io::BufReader::new(file);
+            reader.read_line(&mut buffer)?;
+            if let Some(i) = buffer.rfind(')') {
+                let status_i = i + 2;
+                if let Some(status) = buffer.chars().nth(status_i) {
+                    return Ok(status);
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to read process status for PID {}",
+            pid
+        ))
     }
 }
