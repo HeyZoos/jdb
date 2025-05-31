@@ -121,13 +121,13 @@ struct Pipe {
 impl Pipe {
     fn new(close_on_exec: bool) -> Result<Pipe, Errno> {
         let (read, write) = nix::unistd::pipe2(if close_on_exec {
-            nix::fcntl::OFlag::empty()
-        } else {
             // We pass O_CLOEXEC to pipe2 if `close_on_exec` is true, to
             // ensure that the pipe gets closed when we call `execlp`.
             // Otherwise, the process will hang while trying to read from
             // the pipe due to the duplicated file descriptors.
-            nix::fcntl::OFlag::O_NONBLOCK
+            nix::fcntl::OFlag::O_CLOEXEC`
+        } else {
+            nix::fcntl::OFlag::empty()
         })?;
 
         Ok(Pipe {
@@ -140,15 +140,35 @@ impl Pipe {
         let mut buffer = [0u8; 1024];
         let fd = self.read.as_fd();
         match nix::unistd::read(fd, &mut buffer) {
-            Ok(n) => Ok(buffer[..n].to_vec()),
-            Err(e) => Err(e),
+            Ok(n) => {
+                info!(n_bytes = n, "[{}] Read from pipe", id());
+                Ok(buffer[..n].to_vec())
+            }
+            Err(errno) => {
+                error!(
+                    errno = errno.to_string(),
+                    "[{}] Failed to read from pipe",
+                    id()
+                );
+                Err(errno)
+            }
         }
     }
 
     fn write(&self, bytes: &[u8]) -> Result<(), Errno> {
         match nix::unistd::write(self.write.as_fd(), bytes) {
-            Ok(_) => Ok(()),
-            Err(errno) => Err(errno),
+            Ok(n) => {
+                info!(n_bytes = n, "[{}] Wrote to pipe", id());
+                Ok(())
+            }
+            Err(errno) => {
+                error!(
+                    errno = errno.to_string(),
+                    "[{}] Failed to write to pipe",
+                    id()
+                );
+                Err(errno)
+            }
         }
     }
 }
@@ -176,6 +196,11 @@ impl Process {
     }
 
     fn launch(path: PathBuf) -> anyhow::Result<Process> {
+        info!(
+            path = format!("{:?}", path),
+            "[{}] Attempting to launch program",
+            id()
+        );
         // It’s important to call pipe before fork, or the pipes won’t function;
         // the pipes in the two processes would be completely distinct
         let pipe = Pipe::new(true)?;
@@ -352,17 +377,17 @@ impl Display for ProcessState {
 mod tests {
     use super::*;
 
-
     #[test]
-    fn test_process_launch() {
-        info!("test_process_launch");
+    fn test_process_launch_successfully() {
         tracing_subscriber::fmt::init();
+        info!("test_process_launch");
         let process = Process::launch(PathBuf::from("/bin/echo")).unwrap();
         assert!(process_exists(process.pid));
     }
 
     #[test]
     fn test_process_launch_non_existent_program() {
+        tracing_subscriber::fmt::init();
         info!("test_process_launch_non_existent_program");
         let result = Process::launch(PathBuf::from("/nonexistent/program"));
         assert!(result.is_err());
