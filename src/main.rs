@@ -6,7 +6,7 @@ use nix::sys::ptrace;
 use nix::sys::ptrace::{cont, detach};
 use nix::sys::signal::{SIGCONT, SIGKILL, SIGSTOP, kill};
 use nix::sys::wait::WaitStatus;
-use nix::unistd::{Pid, close};
+use nix::unistd::Pid;
 use nix::{
     sys::wait::waitpid,
     unistd::{ForkResult, fork},
@@ -15,7 +15,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::cmp::PartialEq;
 use std::fmt::{Display, Formatter};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::id;
 use std::str::FromStr;
@@ -112,6 +112,8 @@ struct Args {
 }
 
 struct Pipe {
+    // `OwnedFd` closes the file descriptor on drop.
+    // It is guaranteed that nobody else will close the file descriptor.
     read: OwnedFd,
     write: OwnedFd,
 }
@@ -138,31 +140,16 @@ impl Pipe {
         let mut buffer = [0u8; 1024];
         let fd = self.read.as_fd();
         match nix::unistd::read(fd, &mut buffer) {
-            Ok(_) => Ok(buffer.to_vec()),
-            Err(errno) => Err(errno)
+            Ok(n) => Ok(buffer[..n].to_vec()),
+            Err(e) => Err(e),
         }
     }
 
     fn write(&self, bytes: &[u8]) -> Result<(), Errno> {
         match nix::unistd::write(self.write.as_fd(), bytes) {
             Ok(_) => Ok(()),
-            Err(errno) => Err(errno)
+            Err(errno) => Err(errno),
         }
-    }
-
-    fn close_read(&mut self) {
-        close(self.read.as_raw_fd()).unwrap();
-    }
-
-    fn close_write(&mut self) {
-        close(self.write.as_raw_fd()).unwrap();
-    }
-}
-
-impl Drop for Pipe {
-    fn drop(&mut self) {
-        close(self.read.as_raw_fd()).unwrap();
-        close(self.write.as_raw_fd()).unwrap();
     }
 }
 
@@ -191,10 +178,23 @@ impl Process {
     fn launch(path: PathBuf) -> anyhow::Result<Process> {
         // It’s important to call pipe before fork, or the pipes won’t function;
         // the pipes in the two processes would be completely distinct
-        let mut pipe = Pipe::new(true)?;
-        
+        let pipe = Pipe::new(true)?;
+
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child, .. }) => {
+                let data = pipe.read()?;
+                waitpid(child, None)?;
+
+                if data.len() > 0 {
+                    let chars = String::from_utf8(data)?;
+                    error!(
+                        error = chars,
+                        "[{}] Received an error from the child process",
+                        id()
+                    );
+                    return Err(Errno::UnknownErrno.into());
+                }
+
                 info!(child = child.as_raw(), "[{}] Created child process", id());
                 Ok(Process::builder()
                     .pid(child)
@@ -211,39 +211,33 @@ impl Process {
                     exit_with_pipe_error(&pipe, "Tracing failed");
                 }
                 info!(program = path.to_str().unwrap(), "[{}] Calling exec", id());
-                let program = which(&path)?;
-                let program = program.to_str().unwrap();
+
+                let program = match which(&path) {
+                    Ok(program) => program,
+                    Err(_) => {
+                        error!("[{}] Failed to resolve program to absolute path", id());
+                        exit_with_pipe_error(&pipe, "Failed to resolve program to absolute path");
+                    }
+                };
+
                 info!(
-                    program = &program,
+                    program = &program.to_str().unwrap(),
                     "[{}] Resolved program to absolute path",
                     id()
                 );
-                let program_cstring = std::ffi::CString::from_str(program)?;
+                let program_cstring = std::ffi::CString::from_str(program.to_str().unwrap())?;
                 // Conventionally, argv[0] is the program name.
-                if nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()]).is_err() {
+                if nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()])
+                    .is_err()
+                {
                     exit_with_pipe_error(&pipe, "Exec failed");
                 }
 
-                pipe.close_write();
-                let data = pipe.read()?;
-                pipe.close_read();
-
-                if data.len() > 0 {
-                    waitpid(Pid::from_raw(id() as i32), None)?;
-                    let chars = String::from_utf8(data)?;
-                    error!(error=chars, "[{}] Received an error from the child process", id());
-                    return Err(Errno::UnknownErrno.into());
-                }
-
-                let mut process = Process::builder()
+                Ok(Process::builder()
                     .pid(Pid::from_raw(id() as i32))
                     .state(ProcessState::Stopped)
                     .terminate_on_end(true)
-                    .build();
-
-                process.wait()?;
-
-                Ok(process)
+                    .build())
             }
             Err(errno) => {
                 error!(errno = errno as i32, "Fork failed");
@@ -358,14 +352,18 @@ impl Display for ProcessState {
 mod tests {
     use super::*;
 
+
     #[test]
     fn test_process_launch() {
+        info!("test_process_launch");
+        tracing_subscriber::fmt::init();
         let process = Process::launch(PathBuf::from("/bin/echo")).unwrap();
         assert!(process_exists(process.pid));
     }
 
     #[test]
     fn test_process_launch_non_existent_program() {
+        info!("test_process_launch_non_existent_program");
         let result = Process::launch(PathBuf::from("/nonexistent/program"));
         assert!(result.is_err());
     }
