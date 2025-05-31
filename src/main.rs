@@ -190,7 +190,11 @@ impl Process {
         let _span = span!(tracing::Level::INFO, "attach", pid = id()).entered();
 
         info!(target = pid.as_raw(), "Attaching to target process",);
-        ptrace::attach(pid)?;
+        ptrace::attach(pid).map_err(|error| {
+            error!(error=%error, "Failed to attach to process");
+            error
+        })?;
+        
         let mut process = Process::builder()
             .pid(pid)
             .terminate_on_end(false)
@@ -411,6 +415,13 @@ mod tests {
         let process = Process::attach(pid);
         // The status 't' indicates that the process is stopped
         assert_eq!(get_process_status(process.unwrap().pid).unwrap(), 't');
+    }
+
+    #[test]
+    fn test_process_attach_invalid_pid() {
+        tracing_subscriber::fmt::init();
+        let process = Process::attach(Pid::from_raw(0));
+        assert!(process.is_err());
     }
 
     /// If you call kill with a signal of 0, it doesn’t send a signal to the
