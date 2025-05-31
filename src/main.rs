@@ -405,9 +405,9 @@ mod tests {
 
     #[test]
     fn test_process_attach_successfully() {
-        tracing_subscriber::fmt::init();
-        let target = Process::launch("tail".parse().unwrap(), false);
-        let pid = target.unwrap().pid;
+        // Bind process to variable to keep it alive so the `drop` logic runs after `attach`
+        let target = Process::launch("tail".parse().unwrap(), false).unwrap();
+        let pid = target.pid;
         let process = Process::attach(pid);
         // The status 't' indicates that the process is stopped
         assert_eq!(get_process_status(process.unwrap().pid).unwrap(), 't');
