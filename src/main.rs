@@ -87,6 +87,13 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn exit_with_pipe_error(pipe: &Pipe, prefix: &str) -> ! {
+    let error = std::io::Error::last_os_error();
+    let message = format!("{prefix}: {error}");
+    pipe.write(message.as_bytes()).unwrap();
+    std::process::exit(-1);
+}
+
 #[derive(Debug, Parser)]
 #[command(about, version, group(
     ArgGroup::new("target")
@@ -142,6 +149,14 @@ impl Pipe {
             Err(errno) => Err(errno)
         }
     }
+
+    fn close_read(&mut self) {
+        close(self.read.as_raw_fd()).unwrap();
+    }
+
+    fn close_write(&mut self) {
+        close(self.write.as_raw_fd()).unwrap();
+    }
 }
 
 impl Drop for Pipe {
@@ -173,10 +188,10 @@ impl Process {
             .build())
     }
 
-    fn launch(path: PathBuf) -> Result<Process, Errno> {
+    fn launch(path: PathBuf) -> anyhow::Result<Process> {
         // It’s important to call pipe before fork, or the pipes won’t function;
         // the pipes in the two processes would be completely distinct
-        let pipe = Pipe::new(true)?;
+        let mut pipe = Pipe::new(true)?;
         
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child, .. }) => {
@@ -192,27 +207,47 @@ impl Process {
                 // This is the only ptrace request to be issued by the tracee.
                 // https://docs.rs/nix/latest/nix/sys/ptrace/fn.traceme.html
                 info!("[{}] Asking to be traced", id());
-                ptrace::traceme()?;
+                if ptrace::traceme().is_err() {
+                    exit_with_pipe_error(&pipe, "Tracing failed");
+                }
                 info!(program = path.to_str().unwrap(), "[{}] Calling exec", id());
-                let program = which(&path).unwrap();
+                let program = which(&path)?;
                 let program = program.to_str().unwrap();
                 info!(
                     program = &program,
                     "[{}] Resolved program to absolute path",
                     id()
                 );
-                let program_cstring = std::ffi::CString::from_str(program).unwrap();
+                let program_cstring = std::ffi::CString::from_str(program)?;
                 // Conventionally, argv[0] is the program name.
-                nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()])?;
-                Ok(Process::builder()
+                if nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()]).is_err() {
+                    exit_with_pipe_error(&pipe, "Exec failed");
+                }
+
+                pipe.close_write();
+                let data = pipe.read()?;
+                pipe.close_read();
+
+                if data.len() > 0 {
+                    waitpid(Pid::from_raw(id() as i32), None)?;
+                    let chars = String::from_utf8(data)?;
+                    error!(error=chars, "[{}] Received an error from the child process", id());
+                    return Err(Errno::UnknownErrno.into());
+                }
+
+                let mut process = Process::builder()
                     .pid(Pid::from_raw(id() as i32))
                     .state(ProcessState::Stopped)
                     .terminate_on_end(true)
-                    .build())
+                    .build();
+
+                process.wait()?;
+
+                Ok(process)
             }
             Err(errno) => {
                 error!(errno = errno as i32, "Fork failed");
-                Err(errno)
+                Err(errno.into())
             }
         }
     }
