@@ -324,13 +324,19 @@ impl Drop for Process {
             }
 
             info!("Calling SIGCONT on child process",);
-            kill(self.pid, SIGCONT).unwrap();
+            // Rust forcing me to handle the case where sending the signal fails :)
+            if let Err(err) = kill(self.pid, SIGCONT) {
+                error!(%err, "Failed to send SIGCONT to child process");
+            }
         }
 
         if self.terminate_on_end {
             info!("Calling SIGKILL on child process");
-            kill(self.pid, SIGKILL).unwrap();
-            self.wait().unwrap();
+            if let Err(err) = kill(self.pid, SIGKILL) {
+                error!(%err, "Failed to send SIGKILL to child process");
+            } else {
+                self.wait().unwrap();
+            }
         }
     }
 }
@@ -399,6 +405,15 @@ mod tests {
             attached.resume().unwrap();
             assert!(vec!['R', 'S'].contains(&get_process_status(target.pid).unwrap()))
         }
+    }
+
+    #[test]
+    fn test_process_resume_already_terminated() {
+        tracing_subscriber::fmt::init();
+        let mut target = Process::launch("echo".parse().unwrap(), true).unwrap();
+        target.resume().unwrap();
+        target.wait().unwrap();
+        assert!(target.resume().is_err());
     }
 
     /// If you call kill with a signal of 0, it doesn’t send a signal to the
