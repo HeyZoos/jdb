@@ -15,6 +15,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::cmp::PartialEq;
 use std::fmt::{Display, Formatter};
+use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::id;
@@ -383,6 +384,15 @@ impl Display for ProcessState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
+}
+
+fn get_process_status(pid: Pid) -> anyhow::Result<()> {
+    let process = std::fs::File::open(format!("/proc/{pid}/stat"));
+    if let Ok(mut file) = process {
+        let mut buffer = vec![];
+        file.read_to_end(&mut buffer)?;
+    }
+    todo!()
 }
 
 #[cfg(test)]
