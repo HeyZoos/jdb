@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     };
 
-    info!(child = process.pid.as_raw(), "Waiting for child process",);
+    info!(child=%process.pid, "Waiting for child process",);
 
     process.wait()?;
 
@@ -69,19 +69,15 @@ fn main() -> anyhow::Result<()> {
                 break;
             }
             Err(ReadlineError::Eof) => {
-                info!(pid = id(), "CTRL-D");
+                info!("CTRL-D");
             }
             Err(err) => {
-                info!(pid = id(), "Error: {:?}", err);
+                info!(?err);
             }
         }
     }
 
-    info!(
-        state = process.state.to_string(),
-        "[{}] Process exited",
-        id()
-    );
+    info!(?process.state, "Process exited");
     Ok(())
 }
 
@@ -189,12 +185,13 @@ impl Process {
     fn attach(pid: Pid) -> anyhow::Result<Process> {
         let _span = span!(tracing::Level::INFO, "attach", pid = id()).entered();
 
-        info!(target = pid.as_raw(), "Attaching to target process",);
+        info!(target = %pid, "Attaching to target process");
+
         ptrace::attach(pid).map_err(|error| {
-            error!(error=%error, "Failed to attach to process");
+            error!(%error, "Failed to attach to process");
             error
         })?;
-        
+
         let mut process = Process::builder()
             .pid(pid)
             .terminate_on_end(false)
@@ -210,22 +207,17 @@ impl Process {
     fn launch(path: PathBuf, attach: bool) -> anyhow::Result<Process> {
         let _span = info_span!("launch", pid = id()).entered();
 
-        info!(path = format!("{:?}", path), "Attempting to launch program",);
+        info!(?path, "Attempting to launch program");
         // It’s important to call pipe before fork, or the pipes won’t function;
         // the pipes in the two processes would be completely distinct
         let mut pipe = Pipe::new(true)?;
 
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child, .. }) => {
-                let _span = info_span!("parent", child=%child).entered();
+                let _span = info_span!("parent", %child).entered();
 
                 pipe.close_write();
                 let data = pipe.read()?;
-                info!("Waiting for child process to post status");
-
-                if attach {
-                    waitpid(child, None)?;
-                }
 
                 if data.len() > 0 {
                     let chars = String::from_utf8(data)?;
@@ -233,7 +225,7 @@ impl Process {
                     return Err(Errno::UnknownErrno.into());
                 }
 
-                info!(child = child.as_raw(), "Created child process");
+                info!(%child, "Created child process");
                 Ok(Process::builder()
                     .pid(child)
                     .state(ProcessState::Stopped)
@@ -256,8 +248,6 @@ impl Process {
                     }
                 }
 
-                info!(program = path.to_str().unwrap(), "Calling exec");
-
                 let program = match which(&path) {
                     Ok(program) => program,
                     Err(_) => {
@@ -266,24 +256,17 @@ impl Process {
                     }
                 };
 
-                info!(
-                    program = &program.to_str().unwrap(),
-                    "Resolved program to absolute path",
-                );
+                info!(?program, "Resolved program to absolute path");
                 let program_cstring = std::ffi::CString::from_str(program.to_str().unwrap())?;
+
+                info!(?program, "Calling exec");
                 // Conventionally, argv[0] is the program name.
-                if nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()])
-                    .is_err()
-                {
+                let args = vec![program_cstring.clone()];
+                if nix::unistd::execv::<_>(&program_cstring, &args).is_err() {
                     exit_with_pipe_error(pipe, "Exec failed");
                 }
 
-                Ok(Process::builder()
-                    .pid(Pid::from_raw(id() as i32))
-                    .state(ProcessState::Stopped)
-                    .terminate_on_end(true)
-                    .is_attached(attach)
-                    .build())
+                unreachable!();
             }
             Err(errno) => {
                 error!(errno = errno as i32, "Fork failed");
@@ -303,10 +286,7 @@ impl Process {
         // This call blocks until the child changes state (such as being
         // stopped by a signal)
         let status = waitpid(self.pid, None)?;
-        info!(
-            signal = format!("{:?}", status),
-            "Received signal after waiting",
-        );
+        info!(?status, "Received signal after waiting");
         match status {
             WaitStatus::Exited(_, _) => {
                 self.state = ProcessState::Exited;
@@ -326,48 +306,29 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        info!(
-            child = self.pid.as_raw(),
-            "Entering drop logic for child process",
-        );
+        info!(child=%self.pid, "Entering drop logic for child process");
 
         if self.is_attached {
             if self.state == ProcessState::Running {
-                info!(
-                    child = self.pid.as_raw(),
-                    "Calling SIGSTOP on child process"
-                );
+                info!(child=%self.pid, "Calling SIGSTOP on child process");
                 kill(self.pid, SIGSTOP).unwrap();
                 self.wait().unwrap();
             }
-            info!(
-                child = self.pid.as_raw(),
-                "Detaching from the child process",
-            );
+
+            info!(child=%self.pid, "Detaching from the child process");
             match detach(self.pid, None) {
-                Ok(_) => info!(
-                    child = self.pid.as_raw(),
-                    "Successfully detached from child process",
-                ),
-                Err(errno) => error!(
-                    child = self.pid.as_raw(),
-                    errno = errno as i32,
-                    "Failed to detach from child process",
-                ),
+                Ok(_) => info!(child=%self.pid, "Successfully detached from child process"),
+                Err(errno) => {
+                    error!(child=%self.pid, %errno, "Failed to detach from child process")
+                }
             }
 
-            info!(
-                child = self.pid.as_raw(),
-                "Calling SIGCONT on child process",
-            );
+            info!(child=%self.pid, "Calling SIGCONT on child process",);
             kill(self.pid, SIGCONT).unwrap();
         }
 
         if self.terminate_on_end {
-            info!(
-                child = self.pid.as_raw(),
-                "Calling SIGKILL on child process",
-            );
+            info!(child=%self.pid, "Calling SIGKILL on child process");
             kill(self.pid, SIGKILL).unwrap();
             self.wait().unwrap();
         }
@@ -422,6 +383,23 @@ mod tests {
         tracing_subscriber::fmt::init();
         let process = Process::attach(Pid::from_raw(0));
         assert!(process.is_err());
+    }
+
+    #[test]
+    fn test_process_resume_successfully() {
+        tracing_subscriber::fmt::init();
+        {
+            // Bind process to variable to keep it alive so the `drop` logic runs after `attach`
+            let mut target = Process::launch("tail".parse().unwrap(), true).unwrap();
+            target.resume().unwrap();
+            assert!(vec!['R', 'S'].contains(&get_process_status(target.pid).unwrap()))
+        }
+        {
+            // Bind process to variable to keep it alive so the `drop` logic runs after `attach`
+            let mut target = Process::launch("tail".parse().unwrap(), false).unwrap();
+            target.resume().unwrap();
+            assert!(vec!['R', 'S'].contains(&get_process_status(target.pid).unwrap()))
+        }
     }
 
     /// If you call kill with a signal of 0, it doesn’t send a signal to the
