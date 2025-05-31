@@ -207,7 +207,7 @@ impl Process {
     fn launch(path: PathBuf, attach: bool) -> anyhow::Result<Process> {
         let _span = info_span!("launch", pid = id()).entered();
 
-        info!(?path, "Attempting to launch program");
+        info!(?path, attach, "Attempting to launch program");
         // It’s important to call pipe before fork, or the pipes won’t function;
         // the pipes in the two processes would be completely distinct
         let mut pipe = Pipe::new(true)?;
@@ -276,8 +276,8 @@ impl Process {
     }
 
     fn resume(&mut self) -> anyhow::Result<()> {
+        info!(target=%self.pid, "Resuming the inferior process");
         cont(self.pid, None)?;
-        self.wait()?;
         self.state = ProcessState::Running;
         Ok(())
     }
@@ -306,29 +306,29 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        info!(child=%self.pid, "Entering drop logic for child process");
+        let _span = info_span!("drop", %self.pid, is_attached=?self.is_attached, terminate_on_end=?self.terminate_on_end).entered();
 
         if self.is_attached {
             if self.state == ProcessState::Running {
-                info!(child=%self.pid, "Calling SIGSTOP on child process");
+                info!("Calling SIGSTOP on child process");
                 kill(self.pid, SIGSTOP).unwrap();
                 self.wait().unwrap();
             }
 
-            info!(child=%self.pid, "Detaching from the child process");
+            info!("Detaching from the child process");
             match detach(self.pid, None) {
-                Ok(_) => info!(child=%self.pid, "Successfully detached from child process"),
+                Ok(_) => info!("Successfully detached from child process"),
                 Err(errno) => {
-                    error!(child=%self.pid, %errno, "Failed to detach from child process")
+                    error!(%errno, "Failed to detach from child process")
                 }
             }
 
-            info!(child=%self.pid, "Calling SIGCONT on child process",);
+            info!("Calling SIGCONT on child process",);
             kill(self.pid, SIGCONT).unwrap();
         }
 
         if self.terminate_on_end {
-            info!(child=%self.pid, "Calling SIGKILL on child process");
+            info!("Calling SIGKILL on child process");
             kill(self.pid, SIGKILL).unwrap();
             self.wait().unwrap();
         }
@@ -380,14 +380,12 @@ mod tests {
 
     #[test]
     fn test_process_attach_invalid_pid() {
-        tracing_subscriber::fmt::init();
         let process = Process::attach(Pid::from_raw(0));
         assert!(process.is_err());
     }
 
     #[test]
     fn test_process_resume_successfully() {
-        tracing_subscriber::fmt::init();
         {
             // Bind process to variable to keep it alive so the `drop` logic runs after `attach`
             let mut target = Process::launch("tail".parse().unwrap(), true).unwrap();
@@ -396,8 +394,9 @@ mod tests {
         }
         {
             // Bind process to variable to keep it alive so the `drop` logic runs after `attach`
-            let mut target = Process::launch("tail".parse().unwrap(), false).unwrap();
-            target.resume().unwrap();
+            let target = Process::launch("tail".parse().unwrap(), false).unwrap();
+            let mut attached = Process::attach(target.pid).unwrap();
+            attached.resume().unwrap();
             assert!(vec!['R', 'S'].contains(&get_process_status(target.pid).unwrap()))
         }
     }
