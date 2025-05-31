@@ -217,8 +217,11 @@ impl Process {
 
                 pipe.close_write();
                 let data = pipe.read()?;
-                info!("Waiting for child process to change status");
-                waitpid(child, None)?;
+                info!("Waiting for child process to post status");
+
+                if attach {
+                    waitpid(child, None)?;
+                }
 
                 if data.len() > 0 {
                     let chars = String::from_utf8(data)?;
@@ -238,13 +241,17 @@ impl Process {
                 let _span = info_span!("child", pid = id()).entered();
 
                 pipe.close_read();
-                // Indicates that this process is to be traced by its parent.
-                // This is the only ptrace request to be issued by the tracee.
-                // https://docs.rs/nix/latest/nix/sys/ptrace/fn.traceme.html
-                info!("Asking to be traced");
-                if attach && ptrace::traceme().is_err() {
-                    exit_with_pipe_error(pipe, "Tracing failed");
+
+                if attach {
+                    info!("Asking to be traced");
+                    // Indicates that this process is to be traced by its parent.
+                    // This is the only ptrace request to be issued by the tracee.
+                    // https://docs.rs/nix/latest/nix/sys/ptrace/fn.traceme.html
+                    if ptrace::traceme().is_err() {
+                        exit_with_pipe_error(pipe, "Tracing failed");
+                    }
                 }
+
                 info!(program = path.to_str().unwrap(), "Calling exec");
 
                 let program = match which(&path) {
@@ -267,18 +274,12 @@ impl Process {
                     exit_with_pipe_error(pipe, "Exec failed");
                 }
 
-                let mut process = Process::builder()
+                Ok(Process::builder()
                     .pid(Pid::from_raw(id() as i32))
                     .state(ProcessState::Stopped)
                     .terminate_on_end(true)
                     .is_attached(attach)
-                    .build();
-
-                if attach {
-                    process.wait()?;
-                }
-
-                Ok(process)
+                    .build())
             }
             Err(errno) => {
                 error!(errno = errno as i32, "Fork failed");
