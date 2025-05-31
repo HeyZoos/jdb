@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn exit_with_pipe_error(pipe: &Pipe, prefix: &str) -> ! {
+fn exit_with_pipe_error(pipe: Pipe, prefix: &str) -> ! {
     let error = std::io::Error::last_os_error();
     let message = format!("{prefix}: {error}");
     pipe.write(message.as_bytes()).unwrap();
@@ -114,8 +114,8 @@ struct Args {
 struct Pipe {
     // `OwnedFd` closes the file descriptor on drop.
     // It is guaranteed that nobody else will close the file descriptor.
-    read: OwnedFd,
-    write: OwnedFd,
+    read: Option<OwnedFd>,
+    write: Option<OwnedFd>,
 }
 
 impl Pipe {
@@ -125,20 +125,20 @@ impl Pipe {
             // ensure that the pipe gets closed when we call `execlp`.
             // Otherwise, the process will hang while trying to read from
             // the pipe due to the duplicated file descriptors.
-            nix::fcntl::OFlag::O_CLOEXEC`
+            nix::fcntl::OFlag::O_CLOEXEC
         } else {
             nix::fcntl::OFlag::empty()
         })?;
 
         Ok(Pipe {
-            read: OwnedFd::from(read),
-            write: OwnedFd::from(write),
+            read: Some(OwnedFd::from(read)),
+            write: Some(OwnedFd::from(write)),
         })
     }
 
     fn read(&self) -> Result<Vec<u8>, Errno> {
         let mut buffer = [0u8; 1024];
-        let fd = self.read.as_fd();
+        let fd = self.read.as_ref().unwrap().as_fd();
         match nix::unistd::read(fd, &mut buffer) {
             Ok(n) => {
                 info!(n_bytes = n, "[{}] Read from pipe", id());
@@ -156,7 +156,7 @@ impl Pipe {
     }
 
     fn write(&self, bytes: &[u8]) -> Result<(), Errno> {
-        match nix::unistd::write(self.write.as_fd(), bytes) {
+        match nix::unistd::write(self.write.as_ref().unwrap().as_fd(), bytes) {
             Ok(n) => {
                 info!(n_bytes = n, "[{}] Wrote to pipe", id());
                 Ok(())
@@ -170,6 +170,16 @@ impl Pipe {
                 Err(errno)
             }
         }
+    }
+
+    fn close_read(&mut self) {
+        // By taking ownership of the `OwnedFd` value, we cause it to drop
+        self.read.take();
+    }
+
+    fn close_write(&mut self) {
+        // By taking ownership of the `OwnedFd` value, we cause it to drop
+        self.write.take();
     }
 }
 
@@ -203,10 +213,11 @@ impl Process {
         );
         // It’s important to call pipe before fork, or the pipes won’t function;
         // the pipes in the two processes would be completely distinct
-        let pipe = Pipe::new(true)?;
+        let mut pipe = Pipe::new(true)?;
 
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child, .. }) => {
+                pipe.close_write();
                 let data = pipe.read()?;
                 waitpid(child, None)?;
 
@@ -228,12 +239,13 @@ impl Process {
                     .build())
             }
             Ok(ForkResult::Child) => {
+                pipe.close_read();
                 // Indicates that this process is to be traced by its parent.
                 // This is the only ptrace request to be issued by the tracee.
                 // https://docs.rs/nix/latest/nix/sys/ptrace/fn.traceme.html
                 info!("[{}] Asking to be traced", id());
                 if ptrace::traceme().is_err() {
-                    exit_with_pipe_error(&pipe, "Tracing failed");
+                    exit_with_pipe_error(pipe, "Tracing failed");
                 }
                 info!(program = path.to_str().unwrap(), "[{}] Calling exec", id());
 
@@ -241,7 +253,7 @@ impl Process {
                     Ok(program) => program,
                     Err(_) => {
                         error!("[{}] Failed to resolve program to absolute path", id());
-                        exit_with_pipe_error(&pipe, "Failed to resolve program to absolute path");
+                        exit_with_pipe_error(pipe, "Failed to resolve program to absolute path");
                     }
                 };
 
@@ -255,7 +267,7 @@ impl Process {
                 if nix::unistd::execv::<_>(&program_cstring, &vec![program_cstring.clone()])
                     .is_err()
                 {
-                    exit_with_pipe_error(&pipe, "Exec failed");
+                    exit_with_pipe_error(pipe, "Exec failed");
                 }
 
                 Ok(Process::builder()
@@ -379,7 +391,6 @@ mod tests {
 
     #[test]
     fn test_process_launch_successfully() {
-        tracing_subscriber::fmt::init();
         info!("test_process_launch");
         let process = Process::launch(PathBuf::from("/bin/echo")).unwrap();
         assert!(process_exists(process.pid));
@@ -387,7 +398,6 @@ mod tests {
 
     #[test]
     fn test_process_launch_non_existent_program() {
-        tracing_subscriber::fmt::init();
         info!("test_process_launch_non_existent_program");
         let result = Process::launch(PathBuf::from("/nonexistent/program"));
         assert!(result.is_err());
