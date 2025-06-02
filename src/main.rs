@@ -1,4 +1,3 @@
-mod register;
 
 use bon::Builder;
 use clap::ArgGroup;
