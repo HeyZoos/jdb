@@ -1,3 +1,5 @@
+mod register;
+
 use bon::Builder;
 use clap::ArgGroup;
 use clap::Parser;
