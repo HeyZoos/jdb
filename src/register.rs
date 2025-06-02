@@ -1,16 +1,12 @@
-pub enum RegisterId {
+pub enum RegisterId {}
 
-}
-
-pub enum RegisterType{
-
-}
+pub enum RegisterType {}
 
 pub enum RegisterFormat {
     UInt,
     DoubleFloat,
     LongDouble,
-    Vector
+    Vector,
 }
 
 pub struct RegisterInfo {

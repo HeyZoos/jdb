@@ -3,12 +3,18 @@ name = "jdb"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "jdb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jdb"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.98"
 bon = "3.6.3"
 clap = { version = "4.5.38", features = ["derive"] }
-libc = "0.2.172"
-memoffset = "0.9.1"
 nix = { version = "0.30.1", features = ["process", "ptrace", "signal"] }
 rustyline = "16.0.0"
 tracing = "0.1.41"
